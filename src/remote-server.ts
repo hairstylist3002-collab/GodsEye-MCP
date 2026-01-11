@@ -141,29 +141,40 @@ ${JSON.stringify({ google: googleData, perplexity: perpData }, null, 2)}
   throw new Error("Tool not found");
 });
 
-// --- CRITICAL FIX: SSE SETUP ---
-// Map to store active sessions to prevent "Zombie Connections"
+// --- CRITICAL FIX: SSE SETUP WITH BUFFERING CONTROL ---
 const activeTransports = new Map();
 
-app.get("/sse", async (req, res) => {
+// 1. THE CONNECTION ENDPOINT
+app.get("/sse", (req, res, next) => {
+  // CRITICAL: Disable buffering for Nginx/Railway to fix the 2-minute hang
+  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  next();
+}, async (req, res) => {
   const transport = new SSEServerTransport("/messages", res);
+  
   await server.connect(transport);
   
   // Store session
   activeTransports.set(transport.sessionId, transport);
+  console.log(`New SSE Session Connected: ${transport.sessionId}`);
 
   // Clean up on close
   res.on("close", () => {
+    console.log(`Session closed: ${transport.sessionId}`);
     activeTransports.delete(transport.sessionId);
   });
 });
 
+// 2. THE MESSAGE ENDPOINT
 app.post("/messages", async (req, res) => {
-  // Extract sessionId from query params (added automatically by the client)
   const sessionId = req.query.sessionId;
   const transport = activeTransports.get(sessionId);
 
   if (!transport) {
+    console.log(`404: Session not found for ID ${sessionId}`);
     res.status(404).send("Session not found");
     return;
   }
